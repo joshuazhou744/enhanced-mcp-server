@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # load environment variables from .env
 
-MODEL_ID = "claude-3-5-haiku-20241022"
+MODEL_ID = "claude-3-7-sonnet-20250219"
 
 class MCPClient:
     def __init__(self):
@@ -201,7 +201,7 @@ class MCPClient:
                         elif tool_name == "get_prompt":
                             prompt_name = tool_args["prompt_name"]
                             prompt_arguments = tool_args.get("arguments", {})
-                            print(f"  Getting prompt: {prompt_name}")
+                            print(f"Getting prompt: {prompt_name}")
                             
                             prompt_response = await self.session.get_prompt(
                                 prompt_name,
@@ -239,7 +239,7 @@ class MCPClient:
                             })
                     
                     except Exception as e:
-                        print(f"  Error: {e}")
+                        print(f"Error: {e}")
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": content.id,
