@@ -1,0 +1,4 @@
+mcp==1.15.0
+fastmcp==2.12.4
+anthropic==0.69.0
+python-dotenv==1.1.1
