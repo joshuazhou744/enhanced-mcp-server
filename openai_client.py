@@ -10,9 +10,12 @@ from mcp.shared.context import RequestContext
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
+from openai import OpenAI
+
 load_dotenv()  # load environment variables from .env
 
 MODEL_ID = "claude-3-7-sonnet-20250219"
+MODEL_ID_OPENAI = "gpt-5-nano"
 
 class MCPClient:
     def __init__(self):
@@ -20,6 +23,7 @@ class MCPClient:
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
+        self.openai = OpenAI()
 
     async def handle_elicitation(
         self,

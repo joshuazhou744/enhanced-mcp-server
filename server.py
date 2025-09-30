@@ -102,6 +102,7 @@ async def read_file_resource(file_path: str) -> dict:
         return {"error": f"Error reading file: {str(e)}"}
 
 
+
 @mcp.resource("dir://{directory}")
 async def list_files_resource(directory: str) -> dict:
     """List files in a directory
@@ -117,6 +118,7 @@ async def list_files_resource(directory: str) -> dict:
 
         items = []
         for item in path.iterdir():
+
             stat = item.stat()
             items.append({
                 "name": item.name,
@@ -126,6 +128,7 @@ async def list_files_resource(directory: str) -> dict:
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
             })
+        
 
         return {
             "directory": directory,
@@ -133,27 +136,6 @@ async def list_files_resource(directory: str) -> dict:
         }
     except Exception as e:
         return {"error": f"Error listing files: {e}"}
-
-@mcp.resource("mcp://resource-templates")
-def list_resource_templates() -> dict:
-    """List available resource URI templates"""
-    templates = {
-        "file:///{file_path}": {
-            "description": "Read any file by path",
-            "parameters": {
-                "file_path": "Relative path to the file (e.g., 'server.py', 'src/main.py')"
-            },
-            "examples": ["file:///server.py", "file:///src/main.py"]
-        },
-        "dir://{directory}": {
-            "description": "List directory contents",
-            "parameters": {
-                "directory": "Relative path to directory (e.g., '.', 'src')"
-            },
-            "examples": ["dir://.", "dir://src"]
-        }
-    }
-    return templates
 
 # ============================================================================
 # PROMPTS - Code Editing and Documentation
