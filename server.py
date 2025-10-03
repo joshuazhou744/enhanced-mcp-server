@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""MCP Server for file operations and code documentation.
+
+This server provides tools for file creation/deletion, resources for file/directory
+reading, and prompts for code review and documentation generation.
+"""
 
 import logging
 from pathlib import Path
@@ -6,17 +11,23 @@ from mcp.server.fastmcp import FastMCP, Context
 from pydantic import BaseModel
 from datetime import datetime
 
-# Get project root directory (current working directory)
+# Project root directory (current working directory)
 BASE_DIR = Path.cwd()
 
-# Setup module-level logger
+# Module-level logger for server operations
 logger = logging.getLogger("FileOpServer")
 
-# Documentation file name schema
 class Docname(BaseModel):
+    """Pydantic model for documentation filename schema.
+
+    Used in elicitation to capture user input for documentation file names.
+
+    Attributes:
+        name: The name of the documentation file to create
+    """
     name: str
 
-# Create FastMCP server with lifespan management
+# FastMCP server instance for handling MCP protocol operations
 mcp = FastMCP("File Operations MCP Server")
 
 # ============================================================================
@@ -24,7 +35,20 @@ mcp = FastMCP("File Operations MCP Server")
 # ============================================================================
 
 def get_path(relative_path: str) -> Path:
-    """Return an absolute Path inside the project base directory."""
+    """Convert relative path to absolute path within project directory.
+
+    Ensures the path is within BASE_DIR for security. Resolves the path
+    and validates it's relative to the base directory.
+
+    Args:
+        relative_path: Relative path string to convert
+
+    Returns:
+        Absolute Path object within BASE_DIR
+
+    Raises:
+        ValueError: If path is outside BASE_DIR
+    """
     rel = Path(relative_path).resolve().relative_to(BASE_DIR)
     return BASE_DIR / rel
 
@@ -35,16 +59,27 @@ def get_path(relative_path: str) -> Path:
 
 @mcp.tool()
 async def write_file(file_path: str, content: str, ctx: Context) -> str:
-    """Create a new file with specified content
+    """Create a new file with specified content.
+
+    Creates parent directories if they don't exist. Writes content to the file
+    using UTF-8 encoding.
+
     Args:
         file_path: Relative path where the file should be created
         content: Content to write to the file
+        ctx: MCP context for logging
+
     Returns:
-        Success or error message
+        Success message with file path
+
+    Raises:
+        Exception: If file creation fails (logged to context)
     """
     try:
         path = get_path(file_path)
+        # Create parent directories if they don't exist
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Write content with UTF-8 encoding
         path.write_text(content, encoding='utf-8')
 
         await ctx.info(f"File written successfully to: {file_path}")
@@ -56,15 +91,20 @@ async def write_file(file_path: str, content: str, ctx: Context) -> str:
 
 @mcp.tool()
 async def delete_file(file_path: str, ctx: Context) -> str:
-    """Delete a file from the project directory
+    """Delete a file from the project directory.
+
+    Validates that the path points to a file (not a directory) before deletion.
 
     Args:
         file_path: Relative path to the file to delete
+        ctx: MCP context for logging
+
     Returns:
-        Success or error message
+        Success or error message describing the operation result
     """
     try:
         path = get_path(file_path)
+        # Check if path exists and is a file
         if path.is_file():
             path.unlink()
             await ctx.info(f"Successfully deleted file {file_path}")
@@ -86,20 +126,27 @@ async def delete_file(file_path: str, ctx: Context) -> str:
 
 @mcp.resource("file:///{file_name}")
 async def read_file_resource(file_name: str) -> dict:
-    """Read the content of a file as a resource
+    """Read the content of a file as an MCP resource.
+
+    Provides file content access through the MCP resource protocol using
+    the file:/// URI scheme.
+
     Args:
-        file_path: Relative path to the file
+        file_name: Relative path to the file to read
+
     Returns:
-        File content as string
+        Dictionary containing either file_content or error message
     """
     try:
         path = get_path(file_name)
 
         print(path)
 
+        # Validate path exists and is a file
         if not path.exists() or not path.is_file():
             return {"error": f"Error: {file_name} is not a valid file"}
-        
+
+        # Read and return file content
         return {"file_content": path.read_text(encoding='utf-8')}
     except Exception as e:
         return {"error": f"Error reading file: {str(e)}"}
@@ -108,17 +155,21 @@ async def read_file_resource(file_name: str) -> dict:
 
 @mcp.resource("dir://.")
 async def list_files_resource() -> dict:
-    """List files in current directory
-    Args:
-        None
+    """List files and directories in the current directory as an MCP resource.
+
+    Provides directory listing through the MCP resource protocol using
+    the dir:// URI scheme. Returns metadata for each item including name,
+    path, type, size, and timestamps.
+
     Returns:
-        List of files and directories as newline-separated text
+        Dictionary containing list of items with metadata, or error message
     """
     try:
         path = get_path(".")
         if not path.exists() or not path.is_dir():
             return {"error": f"{path} is not a valid directory"}
 
+        # Collect directory items with metadata
         items = []
         for item in path.iterdir():
 
@@ -131,7 +182,7 @@ async def list_files_resource() -> dict:
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
             })
-        
+
 
         return {
             "items": items
@@ -145,24 +196,35 @@ async def list_files_resource() -> dict:
 
 @mcp.prompt()
 async def code_review(file_path: str, ctx: Context) -> str:
-    """Generate a prompt for code editing and refactoring
+    """Generate a prompt for code review and quality evaluation.
+
+    Reads a code file and generates a prompt for Claude to perform a
+    comprehensive code review.
+
     Args:
-        file_path: Path to the code file to edit
-        instruction: Specific instruction for code modification
+        file_path: Relative path to the code file to review
+        ctx: MCP context for logging and communication
+
     Returns:
-        Code editing prompt
+        Formatted prompt string for code review
+
+    Raises:
+        FileNotFoundError: If the specified file doesn't exist
     """
     try:
         path = get_path(file_path)
 
+        # Validate file exists
         if not path.exists() or not path.is_file():
             error_msg = f"Error: {file_path} is not a valid file"
             await ctx.warning(error_msg)
             raise FileNotFoundError(error_msg)
 
+        # Read code and detect language from extension
         current_code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
 
+        # Generate structured prompt for code review
         prompt = f"""You are an expert code editor. Review the following code quality.
 
 File: {file_path}
@@ -176,39 +238,52 @@ Current code:
 Provide a comprehensive evaluation of the code:
 
 """.strip()
-        
+
         await ctx.info("Successfully returned prompt")
         return prompt
 
     except Exception as e:
         await ctx.error(f"Error preparing code review prompt: {e}")
         raise
-    
+
 @mcp.prompt()
 async def documentation_generator(file_path: str, ctx: Context) -> str:
-    """Generate a prompt for creating documentation
+    """Generate a prompt for creating code documentation.
+
+    Reads a code file, elicits a documentation filename from the user,
+    and generates a prompt for Claude to create comprehensive documentation.
+
     Args:
-        file_path: Path to the code file to document
+        file_path: Relative path to the code file to document
+        ctx: MCP context for logging and elicitation
+
     Returns:
-        Documentation generation prompt
+        Formatted prompt string for documentation generation
+
+    Raises:
+        FileNotFoundError: If the specified file doesn't exist
     """
     try:
         path = get_path(file_path)
 
+        # Validate file exists
         if not path.exists() or not path.is_file():
             error_msg = f"Error: {file_path} is not a valid file"
             await ctx.warning(error_msg)
             raise FileNotFoundError(error_msg)
 
+        # Read code and detect language from extension
         code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
 
+        # Elicit documentation filename from user via client
         result = await ctx.elicit(
             "Please provide the documentation file name",
             schema=Docname
         )
         doc_name = result.data.name
 
+        # Generate structured prompt for documentation creation
         prompt = f"""You are an expert technical writer and documentation specialist. Create documentation for the following code file:
 
 File: {file_path}
@@ -236,5 +311,12 @@ Use MCP tools available to you to create the separate documentation file:
 # ============================================================================
 
 if __name__ == "__main__":
+    """Entry point for running the MCP server.
+
+    Starts the FastMCP server which listens for MCP protocol messages on stdio.
+    The server exposes file operation tools, file/directory resources, and
+    code documentation prompts.
+    """
     logger.info("Starting File Operations Server...")
+    # Start the FastMCP server (blocks until terminated)
     mcp.run()
