@@ -25,7 +25,8 @@ mcp = FastMCP("File Operations MCP Server")
 
 def get_path(relative_path: str) -> Path:
     """Return an absolute Path inside the project base directory."""
-    return BASE_DIR / relative_path
+    rel = Path(relative_path).resolve().relative_to(BASE_DIR)
+    return BASE_DIR / rel
 
 # ============================================================================
 # TOOLS - File Operations
@@ -83,8 +84,8 @@ async def delete_file(file_path: str, ctx: Context) -> str:
 # RESOURCES - File Reading
 # ============================================================================
 
-@mcp.resource("file:///{file_path}")
-async def read_file_resource(file_path: str) -> dict:
+@mcp.resource("file:///{file_name}")
+async def read_file_resource(file_name: str) -> dict:
     """Read the content of a file as a resource
     Args:
         file_path: Relative path to the file
@@ -92,10 +93,12 @@ async def read_file_resource(file_path: str) -> dict:
         File content as string
     """
     try:
-        path = get_path(file_path)
+        path = get_path(file_name)
+
+        print(path)
 
         if not path.exists() or not path.is_file():
-            return {"error": f"Error: {file_path} is not a valid file"}
+            return {"error": f"Error: {file_name} is not a valid file"}
         
         return {"file_content": path.read_text(encoding='utf-8')}
     except Exception as e:
@@ -103,16 +106,16 @@ async def read_file_resource(file_path: str) -> dict:
 
 
 
-@mcp.resource("dir://{directory}")
-async def list_files_resource(directory: str) -> dict:
-    """List files in a directory
+@mcp.resource("dir://.")
+async def list_files_resource() -> dict:
+    """List files in current directory
     Args:
-        directory: Relative path to directory
+        None
     Returns:
         List of files and directories as newline-separated text
     """
     try:
-        path = get_path(directory)
+        path = get_path(".")
         if not path.exists() or not path.is_dir():
             return {"error": f"{path} is not a valid directory"}
 
@@ -131,18 +134,17 @@ async def list_files_resource(directory: str) -> dict:
         
 
         return {
-            "directory": directory,
             "items": items
         }
     except Exception as e:
         return {"error": f"Error listing files: {e}"}
 
 # ============================================================================
-# PROMPTS - Code Editing and Documentation
+# PROMPTS - Code Editing
 # ============================================================================
 
 @mcp.prompt()
-async def code_editor(file_path: str, instruction: str, ctx: Context) -> str:
+async def code_review(file_path: str, ctx: Context) -> str:
     """Generate a prompt for code editing and refactoring
     Args:
         file_path: Path to the code file to edit
@@ -154,39 +156,34 @@ async def code_editor(file_path: str, instruction: str, ctx: Context) -> str:
         path = get_path(file_path)
 
         if not path.exists() or not path.is_file():
-            await ctx.warning(f"Error: {file_path} is not a valid file to code review")
-            return f"Error: {file_path} is not a valid file to code review"
-        
+            error_msg = f"Error: {file_path} is not a valid file"
+            await ctx.warning(error_msg)
+            raise FileNotFoundError(error_msg)
+
         current_code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
 
-        prompt = f"""You are an expert code editor. Please help me modify the following code file.
+        prompt = f"""You are an expert code editor. Review the following code quality.
 
 File: {file_path}
 Language (file suffix): {language or "unknown"}
-Instruction: {instruction}
 
 Current code:
 ```
 {current_code}
 ```
 
-Please provide the updated code that follows the instruction. Make sure to:
-1. Follow best practices for the programming language
-2. Add appropriate comments if needed
-3. Maintain code readability and structure
-4. Handle edge cases appropriately
+Provide a comprehensive evaluation of the code:
 
-Return only the updated code without additional explanations unless specifically requested.""".strip()
+""".strip()
         
         await ctx.info("Successfully returned prompt")
         return prompt
 
     except Exception as e:
         await ctx.error(f"Error preparing code review prompt: {e}")
-        return f"Error preparing code review prompt: {e}"
-
-
+        raise
+    
 @mcp.prompt()
 async def documentation_generator(file_path: str, ctx: Context) -> str:
     """Generate a prompt for creating documentation
@@ -199,8 +196,9 @@ async def documentation_generator(file_path: str, ctx: Context) -> str:
         path = get_path(file_path)
 
         if not path.exists() or not path.is_file():
-            await ctx.warning(f"Error: {file_path} is not a valid file to code review")
-            return f"Error: {file_path} is not a valid file to code review"
+            error_msg = f"Error: {file_path} is not a valid file"
+            await ctx.warning(error_msg)
+            raise FileNotFoundError(error_msg)
 
         code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
@@ -209,9 +207,9 @@ async def documentation_generator(file_path: str, ctx: Context) -> str:
             "Please provide the documentation file name",
             schema=Docname
         )
-        doc_name = result.data
+        doc_name = result.data.name
 
-        prompt = f"""You are an expert technical writer and documentation specialist. Please help me create documentation for the following code file.
+        prompt = f"""You are an expert technical writer and documentation specialist. Create documentation for the following code file:
 
 File: {file_path}
 Language (file suffix): {language or "unknown"}
@@ -221,14 +219,8 @@ Current code:
 {code}
 ```
 
-Please provide:
-1. Well-structured documentation following best practices
-2. Clear explanations of functionality
-3. Usage examples where appropriate
-4. Documentation formatted in markdown  
-
 Use MCP tools available to you to create the separate documentation file:
-- **Name that separate document EXACTLY: {doc_name}**
+- **CRITICAL DETAIL: Name that separate document EXACTLY: {doc_name}**
 - Add the .md suffix yourself if the name doesn't include it already""".strip()
 
         await ctx.info("Successfully returned prompt")
@@ -236,7 +228,7 @@ Use MCP tools available to you to create the separate documentation file:
 
     except Exception as e:
         await ctx.error(f"Error generating code documentation prompt: {e}")
-        return f"Error generating code documentation prompt: {e}"
+        raise
 
 
 # ============================================================================

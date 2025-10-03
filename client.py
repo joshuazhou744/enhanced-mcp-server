@@ -1,11 +1,20 @@
 import asyncio
-from typing import Optional
+import sys
+import json
+from typing import Optional, Dict, Any, List, Union
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import ElicitRequestParams, ElicitResult
 from mcp.shared.context import RequestContext
+from mcp.shared.exceptions import McpError
+
+try:
+    from fastmcp.client.transports import StreamableHttpTransport
+    HAS_HTTP_TRANSPORT = True
+except ImportError:
+    HAS_HTTP_TRANSPORT = False
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -21,36 +30,6 @@ class MCPClient:
         self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
 
-    async def handle_elicitation(
-        self,
-        context: RequestContext[ClientSession, any],
-        params: ElicitRequestParams
-    ) -> ElicitResult:
-        """Handle elicitation requests from the server by prompting the human user"""
-        print(f"\n🤖 Server Request: {params.message}")
-
-        # Collect user input for each field in the schema
-        properties = params.requestedSchema.get('properties', {})
-        user_data = {}
-
-        for field_name, field_info in properties.items():
-            field_type = field_info.get('type', 'string')
-            prompt = f"{field_name} ({field_type}): "
-
-            user_input = input(prompt).strip()
-
-            # Convert to appropriate type
-            if field_type == 'integer':
-                user_data[field_name] = int(user_input)
-            elif field_type == 'number':
-                user_data[field_name] = float(user_input)
-            elif field_type == 'boolean':
-                user_data[field_name] = user_input.lower() in ('true', 'yes', '1')
-            else:
-                user_data[field_name] = user_input
-
-        return ElicitResult(action="accept", content=user_data)
-
     async def connect_to_server(self, server_script_path: str):
         """Connect to an MCP server
         
@@ -59,8 +38,10 @@ class MCPClient:
         """
         is_python = server_script_path.endswith('.py')
         is_ts = server_script_path.endswith('.ts')
-        if not (is_python or is_ts):
-            raise ValueError("Server script must be a .py or .ts file")
+        is_js = server_script_path.endswith('.js')
+        
+        if not (is_python or is_ts or is_js):
+            raise ValueError("Server script must be a .py, .js, or .ts file")
             
         command = "python" if is_python else "node"
         server_params = StdioServerParameters(
@@ -85,8 +66,82 @@ class MCPClient:
 
         await self.session.initialize()
 
+    async def handle_elicitation(
+        self,
+        context: RequestContext[ClientSession, Any],
+        params: ElicitRequestParams
+    ) -> ElicitResult:
+        """Handle elicitation requests from the server by prompting the human user"""
+        print(f"\n🤖 Server Request: {params.message}")
+
+        # Collect user input for each field in the schema
+        properties = params.requestedSchema.get('properties', {})
+        user_data = {}
+
+        for field_name, field_info in properties.items():
+            field_type = field_info.get('type', 'string')
+            description = field_info.get('description', '')
+            prompt = f"{field_name} ({field_type})"
+            if description:
+                prompt += f": {description}"
+            prompt += ": "
+
+            user_input = input(prompt).strip()
+
+            # Convert to appropriate type
+            try:
+                if field_type == 'integer':
+                    user_data[field_name] = int(user_input)
+                elif field_type == 'number':
+                    user_data[field_name] = float(user_input)
+                elif field_type == 'boolean':
+                    user_data[field_name] = user_input.lower() in ('true', 'yes', '1')
+                else:
+                    user_data[field_name] = user_input
+            except ValueError:
+                print(f"Invalid input for {field_name}. Using as string.")
+                user_data[field_name] = user_input
+
+        return ElicitResult(action="accept", content=user_data)
+
+    async def _get_tools(self) -> List[Dict[str, Any]]:
+        """Retrieve available tools from the server"""
+        tools_response = await self.session.list_tools()
+        tools = [
+            {
+                "name": tool.name,
+                "description": tool.description or "MCP Tool",
+                "input_schema": tool.inputSchema,
+            }
+            for tool in tools_response.tools
+        ]
+
+        return tools
+    
+    async def _get_prompts(self):
+        """Retrieve available prompts from the server"""
+        prompts_response = await self.session.list_prompts()
+        return prompts_response
+    
+    async def _get_resources(self):
+        """Retrieve available resources from the server"""
+        resources_response = await self.session.list_resources()
+        return resources_response
+    
+    async def _get_resource_templates(self):
+        """Retrieve available resource templates from the server"""
+        resource_templates_response = await self.session.list_resource_templates()
+        return resource_templates_response
+
     async def process_query(self, query: str) -> str:
-        """Process a query using Claude and available tools"""
+        """Process a query using Claude and available tools
+        
+        Args:
+            query: The user's query to process
+            
+        Returns:
+            The final text response from Claude
+        """
         messages = [
             {
                 "role": "user",
@@ -94,73 +149,13 @@ class MCPClient:
             }
         ]
 
-        available_tools = []
-
         # Add server tools
-        tools_response = await self.session.list_tools()
-        available_tools.extend(
-            {
-                "name": tool.name,
-                "description": tool.description or "MCP Tool",
-                "input_schema": tool.inputSchema,
-            }
-            for tool in tools_response.tools
-        )
-
-        # Add server prompts (same shape)
-        prompts_response = await self.session.list_prompts()
-        if prompts_response.prompts:
-            prompt_list = []
-            for p in prompts_response.prompts:
-                args_desc = ""
-                if p.arguments:
-                    args = [f"{a.name} ({'required' if a.required else 'optional'})" for a in p.arguments]
-                    args_desc = f" (args: {', '.join(args)})"
-                prompt_list.append(f"{p.name}{args_desc}")
-            
-            available_tools.append({
-                "name": "get_prompt",
-                "description": f"Get a pre-defined prompt from the MCP server. Available prompts: {'; '.join(prompt_list)}. The prompt will be inserted into the conversation.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "prompt_name": {
-                            "type": "string",
-                            "description": "Name of the prompt to retrieve"
-                        },
-                        "arguments": {
-                            "type": "object",
-                            "description": "Arguments for the prompt (if required)",
-                            "additionalProperties": True
-                        }
-                    },
-                    "required": ["prompt_name"]
-                }
-            })
-
-        resource_templates = await self.session.list_resource_templates()
-
-        templates_data = [f"URI: {template.uriTemplate}\n Description: {template.description or 'No description'}\n Example: {template.uriTemplate.replace('{file_path}', 'server.py').replace('{directory}', '.')}" for template in resource_templates.resourceTemplates]
-        
-        available_tools.append({
-            "name": "read_resource",
-            "description": f"Read an MCP resource. Available templates: \n" + "\n".join(templates_data),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "uri": {
-                        "type": "string",
-                        "description": "The resource URI. Replace {parameters} with actual values."
-                    }
-                },
-                "required": ["uri"]
-            }
-        })
+        available_tools = await self._get_tools()
 
         # Initial Claude API call
         response = self.anthropic.messages.create(
             model=MODEL_ID,
-            max_tokens=1000,
+            max_tokens=4096,
             messages=messages,
             tools=available_tools
         )
@@ -181,65 +176,24 @@ class MCPClient:
                     tool_args = content.input
                     
                     try:
-                        if tool_name == "read_resource":
-                            # Strip trailing slash defensively
-                            uri = tool_args["uri"].rstrip('/')
-                            
-                            resource = await self.session.read_resource(uri)
-                            result_content = []
-                            for content_part in resource.contents:
-                                if content_part.text:
-                                    result_content.append(content_part.text)
-                                elif content_part.blob:
-                                    result_content.append(f"[Binary: {len(content_part.blob)} bytes]")
-                            
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": "\n".join(result_content)
-                            })
+                        result = await self.session.call_tool(tool_name, tool_args)
                         
-                        elif tool_name == "get_prompt":
-                            prompt_name = tool_args["prompt_name"]
-                            prompt_arguments = tool_args.get("arguments", {})
-                            
-                            prompt_response = await self.session.get_prompt(
-                                prompt_name,
-                                arguments=prompt_arguments
-                            )
-                            
-                            prompt_content = []
-                            for message in prompt_response.messages:
-                                text = (message.content.text 
-                                       if hasattr(message.content, 'text') 
-                                       else str(message.content))
-                                prompt_content.append(f"[{message.role}]: {text}")
-                            
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": "\n\n".join(prompt_content)
-                            })
-                        
+                        if isinstance(result.content, list):
+                            result_text = "\n".join([
+                                c.text if hasattr(c, 'text') else str(c)
+                                for c in result.content
+                            ])
                         else:
-                            result = await self.session.call_tool(tool_name, tool_args)
-                            
-                            if isinstance(result.content, list):
-                                result_text = "\n".join([
-                                    c.text if hasattr(c, 'text') else str(c)
-                                    for c in result.content
-                                ])
-                            else:
-                                result_text = result.content
-                            
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content.id,
-                                "content": result_text
-                            })
+                            result_text = result.content
+                        
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": content.id,
+                            "content": result_text
+                        })
                     
                     except Exception as e:
-                        print(f"Error: {e}")
+                        print(f"Error calling tool {tool_name}: {e}")
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": content.id,
@@ -268,41 +222,164 @@ class MCPClient:
                 final_text.append(content.text)
 
         return "\n".join(final_text)
+    
+    async def prompt(self, prompt_name: str):
+        """Execute a named prompt from the server"""
+        try:
+            prompts_response = await self._get_prompts()
+            prompt_obj = next(
+                (p for p in prompts_response.prompts if p.name == prompt_name),
+                None
+            )
+
+            if not prompt_obj:
+                print(f"Prompt '{prompt_name}' not found")
+                return
+            
+            arguments = {}
+            if prompt_obj.arguments:
+                for arg in prompt_obj.arguments:
+                    required = "required" if arg.required else "optional"
+                    user_input = input(f"{arg.name} ({required}): ").strip()
+
+                    if not user_input and arg.required:
+                        print(f"Error: {arg.name} is required")
+                        return
+
+                    if user_input:    
+                        arguments[arg.name] = user_input
+            
+            prompt_result = await self.session.get_prompt(prompt_name, arguments=arguments)
+
+            prompt = prompt_result.messages[0].content.text
+
+            response = await self.process_query(prompt)
+            print(response)
+
+        except McpError as e:
+            print(f"Server Error: {e}\n")
+            return
+        except Exception as e:
+            print(f"Error: {type(e).__name__}: {e}\n")
+            return
+
+
+    async def read_file(self):
+        """Read the contents of a file and process it with the agent"""
+        try:
+            file_name = input("Enter file path: ").strip()
+            resource = await self.session.read_resource(f"file:///{file_name}")
+            file_content = json.loads(resource.contents[0].text)["file_content"]
+            
+            print(f"File Content:\n {file_content}")
+            return file_content
+        except Exception as e:
+            print(f"Error reading file: {e}")
+
+    def _print_dir_listing(self, items: list[dict]):
+        print("\nDirectory Listing:\n")
+        print(f"{'Type':<10} {'Size':>10} {'Modified':<25} {'Name'}")
+        print("-" * 70)
+        for item in items:
+            type_icon = "📁" if item["type"] == "directory" else "📄"
+            size = f"{item['size']} B"
+            print(f"{type_icon:<2} {item['type']:<8} {size:>10}  {item['modified']:<25} {item['name']}")
+
+
+    async def read_dir(self):
+        """List the contents of a directory and process it with the agent"""
+        try:
+            resource = await self.session.read_resource(f"dir://.")
+            dir_list = json.loads(resource.contents[0].text)["items"]
+            self._print_dir_listing(dir_list)
+            return
+        except Exception as e:
+            print(f"Error reading directory: {e}")
+
+    async def converse(self):
+        """Start a conversation with the agent"""
+        print("\nEntering conversation mode. Type 'quit' or 'q' to exit.")
+        
+        while True:
+            query = input("\nQuery: ").strip()
+            
+            if query.lower() in ("quit", "q"):
+                break  # signal exit
+                
+            if not query:
+                print("Please enter a query")
+                continue
+                
+            try:
+                response = await self.process_query(query)
+                print("\n" + response)
+            except Exception as e:
+                print(f"Error processing query: {e}")
+
+        return
+
+    async def quit_action(self):
+        """Exit the client"""
+        return "quit"
 
     async def chat_loop(self):
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
-        print("Type your queries or 'quit'/'q' to exit.")
+        print("Select from the menu or 'quit'/'q' to exit.")
         
+        menu_actions = {
+            "1": lambda: self.prompt("documentation_generator"),
+            "2": lambda: self.prompt("code_review"),
+            "3": self.read_file,
+            "4": self.read_dir,
+            "5": self.converse,
+            "q": self.quit_action,
+            "quit": self.quit_action
+        }
+
         while True:
-            try:
-                query = input("\nQuery: ").strip()
-                
-                if query.lower() == 'quit' or query.lower() == 'q':
-                    break
-                    
-                response = await self.process_query(query)
-                print("\n" + response)
-                    
-            except Exception as e:
-                print(f"\nError: {str(e)}")
+            choice = input("""
+Select from the Menu
+1. Generate Documentation
+2. Review Code
+3. Read File
+4. Read Current Directory
+5. Converse with Agent
+q. Quit
+> """).strip()
+
+            action = menu_actions.get(choice)
+
+            if not action:
+                print("Invalid choice. Please try again.")
+                continue
+
+            result = await action()
+            if result == "quit":
+                break
     
     async def cleanup(self):
         """Clean up resources"""
-        await self.exit_stack.aclose()
+        if self.exit_stack:
+            await self.exit_stack.aclose()
 
 async def main():
     if len(sys.argv) < 2:
-        print("Usage: python client.py <path_to_server_script>")
+        print("Usage: python client.py <server_path>")
         sys.exit(1)
-        
+
     client = MCPClient()
     try:
-        await client.connect_to_server(sys.argv[1])
+        server_path = sys.argv[1]
+        print(f"Connecting to server: {server_path}")
+
+        await client.connect_to_server(server_path)
+
         await client.chat_loop()
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: {e}")
     finally:
         await client.cleanup()
 
 if __name__ == "__main__":
-    import sys
     asyncio.run(main())
