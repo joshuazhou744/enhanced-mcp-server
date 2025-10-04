@@ -223,9 +223,9 @@ File: {file_path}
 Language (file suffix): {language or "unknown"}
 
 Current code:
-```
+'''
 {current_code}
-```
+'''
 
 Provide a comprehensive evaluation of the code:
 
@@ -282,9 +282,9 @@ File: {file_path}
 Language (file suffix): {language or "unknown"}
 
 Current code:
-```
+'''
 {code}
-```
+'''
 
 Use MCP tools available to you to create the separate documentation file:
 - **CRITICAL DETAIL: Name that separate document EXACTLY: {doc_name}**
