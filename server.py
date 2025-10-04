@@ -1,12 +1,6 @@
-#!/usr/bin/env python3
-"""MCP Server for file operations and code documentation.
-
-This server provides tools for file creation/deletion, resources for file/directory
-reading, and prompts for code review and documentation generation.
-"""
-
 import logging
 from pathlib import Path
+from urllib.parse import unquote
 from mcp.server.fastmcp import FastMCP, Context
 from pydantic import BaseModel
 from datetime import datetime
@@ -50,7 +44,7 @@ def get_path(relative_path: str) -> Path:
         ValueError: If path is outside BASE_DIR
     """
     rel = Path(relative_path).resolve().relative_to(BASE_DIR)
-    return BASE_DIR / rel
+    return rel
 
 # ============================================================================
 # TOOLS - File Operations
@@ -140,14 +134,12 @@ async def read_file_resource(file_name: str) -> dict:
     try:
         path = get_path(file_name)
 
-        print(path)
-
         # Validate path exists and is a file
         if not path.exists() or not path.is_file():
             return {"error": f"Error: {file_name} is not a valid file"}
-
         # Read and return file content
         return {"file_content": path.read_text(encoding='utf-8')}
+
     except Exception as e:
         return {"error": f"Error reading file: {str(e)}"}
 
