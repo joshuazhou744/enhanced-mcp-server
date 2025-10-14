@@ -4,17 +4,8 @@ import json
 from typing import Optional, Dict, Any, List, Union
 from contextlib import AsyncExitStack
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.types import ElicitRequestParams, ElicitResult
-from mcp.shared.context import RequestContext
-from mcp.shared.exceptions import McpError
-
-try:
-    from fastmcp.client.transports import StreamableHttpTransport
-    HAS_HTTP_TRANSPORT = True
-except ImportError:
-    HAS_HTTP_TRANSPORT = False
+from fastmcp import Client
+from fastmcp.client.elicitation import ElicitResult
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -35,12 +26,10 @@ class MCPClient:
         """Initialize the MCP client with session management and Anthropic API client.
 
         Sets up:
-        - ClientSession for MCP server communication
         - AsyncExitStack for managing async context managers
         - Anthropic client for Claude API interactions
         """
-        # Initialize session and client objects
-        self.session: Optional[ClientSession] = None
+        # Initialize session and LLM provider objects
         self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
 
@@ -64,84 +53,78 @@ class MCPClient:
         if not (is_python or is_ts or is_js):
             raise ValueError("Server script must be a .py, .js, or .ts file")
 
-        # Select appropriate runtime command
-        command = "python" if is_python else "node"
-        server_params = StdioServerParameters(
-            command=command,
-            args=[server_script_path],
-            env=None
+        self.client = Client(
+            server_script_path, 
+            elicitation_handler=self.handle_elicitation,
+            progress_handler=self.handle_progress,
+            message_handler=self.handle_message
         )
 
-        # Establish stdio transport connection
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        self.stdio, self.write = stdio_transport
+        await self.exit_stack.enter_async_context(self.client)
 
-        # Create client session with elicitation callback for server requests
-        self.session = await self.exit_stack.enter_async_context(
-            ClientSession(
-                self.stdio,
-                self.write,
-                elicitation_callback=self.handle_elicitation,
-                client_info={
-                    "name": "mcp-client",
-                    "version": "1.0.0",
-                }
-            )
-        )
+    async def handle_elicitation(self, message: str, response_type: type, params, context):
+        """Handle elicitation requests from the MCP server.
 
-        # Initialize the session with the server
-        await self.session.initialize()
-
-    async def handle_elicitation(
-        self,
-        context: RequestContext[ClientSession, Any],
-        params: ElicitRequestParams
-    ) -> ElicitResult:
-        """Handle elicitation requests from the server by prompting the user for input.
-
-        When the MCP server needs additional information, it can elicit data from
-        the user through this callback. The method prompts for each field defined
-        in the schema and performs type conversion.
+        When the server needs user input, this handler prompts the user,
+        collects their response, and returns it in the expected format.
 
         Args:
-            context: Request context from the MCP session
-            params: Elicitation parameters including message and schema
+            message: The question or prompt from the server
+            response_type: Pydantic model defining the expected response structure
+            params: Additional parameters for the elicitation
+            context: Elicitation context information
 
         Returns:
-            ElicitResult with action="accept" and collected user data
+            ElicitResult with action="decline" if no response, or response_type instance with user input
         """
-        print(f"\n🤖 Server Request: {params.message}")
+        print(f"Server asks: {message}")
 
-        # Collect user input for each field in the schema
-        properties = params.requestedSchema.get('properties', {})
         user_data = {}
+        for field_name, field_type in response_type.__annotations__.items():
+            user_input = input(f"Enter value for '{field_name}' ({field_type.__name__}): ").strip()
+            if not user_input:
+                return ElicitResult(action="decline")
 
-        # Prompt for each field defined in the schema
-        for field_name, field_info in properties.items():
-            field_type = field_info.get('type', 'string')
-            description = field_info.get('description', '')
-            prompt = f"{field_name} ({field_type})"
-            if description:
-                prompt += f": {description}"
-            prompt += ": "
+            user_data[field_name] = user_input
 
-            user_input = input(prompt).strip()
+        # Return the structured response object
+        return response_type(**user_data)
 
-            # Convert to appropriate type based on schema
-            try:
-                if field_type == 'integer':
-                    user_data[field_name] = int(user_input)
-                elif field_type == 'number':
-                    user_data[field_name] = float(user_input)
-                elif field_type == 'boolean':
-                    user_data[field_name] = user_input.lower() in ('true', 'yes', '1')
-                else:
-                    user_data[field_name] = user_input
-            except ValueError:
-                print(f"Invalid input for {field_name}. Using as string.")
-                user_data[field_name] = user_input
+    async def handle_progress(self, progress: float, total: float | None, message: str | None) -> None:
+        """Handle progress notifications from the MCP server.
 
-        return ElicitResult(action="accept", content=user_data)
+        Displays progress updates to the user, showing percentage complete if total is provided.
+
+        Args:
+            progress: Current progress value
+            total: Total expected progress value (None if unknown)
+            message: Optional descriptive message about current progress
+        """
+        if total is not None:
+            percentage = (progress / total) * 100
+            print(f"Progress: {percentage:.1f}% - {message or ''}")
+        else:
+            print(f"Progress: {progress} - {message or ''}")
+
+    async def handle_message(self, message):
+        """Handle notification messages from the MCP server.
+
+        Processes server notifications such as tool list changes or resource updates
+        and displays appropriate messages to the user.
+
+        Args:
+            message: MCP notification message from the server
+        """
+        if hasattr(message, 'root'):
+            method = message.root.method
+            print(f"Received: {method}")
+
+            if method == "notifications/tools/list_changed":
+                print("Tools have changed - might want to refresh tool cache")
+            elif method == "notifications/resources/list_changed":
+                print("Resources have changed")
+
+
 
     async def _get_tools(self) -> List[Dict[str, Any]]:
         """Retrieve available tools from the MCP server.
@@ -152,7 +135,7 @@ class MCPClient:
         Returns:
             List of tool definitions with name, description, and input schema
         """
-        tools_response = await self.session.list_tools()
+        tools_response = await self.client.list_tools()
         # Format tools for Claude API compatibility
         tools = [
             {
@@ -160,9 +143,9 @@ class MCPClient:
                 "description": tool.description or "MCP Tool",
                 "input_schema": tool.inputSchema,
             }
-            for tool in tools_response.tools
+            for tool in tools_response
         ]
-
+        
         return tools
 
     async def _get_prompts(self):
@@ -171,7 +154,9 @@ class MCPClient:
         Returns:
             PromptsResponse containing available prompt templates
         """
-        prompts_response = await self.session.list_prompts()
+        
+        prompts_response = await self.client.list_prompts()
+        
         return prompts_response
 
     async def _get_resources(self):
@@ -180,7 +165,7 @@ class MCPClient:
         Returns:
             ResourcesResponse containing available resources
         """
-        resources_response = await self.session.list_resources()
+        resources_response = await self.client.list_resources()
         return resources_response
 
     async def _get_resource_templates(self):
@@ -189,7 +174,7 @@ class MCPClient:
         Returns:
             ResourceTemplatesResponse containing available resource templates
         """
-        resource_templates_response = await self.session.list_resource_templates()
+        resource_templates_response = await self.client.list_resource_templates()
         return resource_templates_response
 
     async def process_query(self, query: str) -> str:
@@ -241,7 +226,7 @@ class MCPClient:
 
                     try:
                         # Call the tool via MCP session
-                        result = await self.session.call_tool(tool_name, tool_args)
+                        result = await self.client.call_tool(tool_name, tool_args)
 
                         # Format result content
                         if isinstance(result.content, list):
@@ -303,7 +288,7 @@ class MCPClient:
             # Fetch available prompts from server
             prompts_response = await self._get_prompts()
             prompt_obj = next(
-                (p for p in prompts_response.prompts if p.name == prompt_name),
+                (p for p in prompts_response if p.name == prompt_name),
                 None
             )
 
@@ -327,17 +312,13 @@ class MCPClient:
                         arguments[arg.name] = user_input
 
             # Generate the prompt with provided arguments
-            prompt_result = await self.session.get_prompt(prompt_name, arguments=arguments)
+            prompt_result = await self.client.get_prompt(prompt_name, arguments=arguments)
 
             prompt = prompt_result.messages[0].content.text
 
             # Process the generated prompt with Claude
             response = await self.process_query(prompt)
             print(response)
-
-        except McpError as e:
-            print(f"Server Error: {e}\n")
-            return
         except Exception as e:
             print(f"Error: {type(e).__name__}: {e}\n")
             return
@@ -352,7 +333,7 @@ class MCPClient:
         try:
             file_name = input("Enter file path: ").strip()
             # Access file resource using file:/// URI scheme
-            resource = await self.session.read_resource(f"file:///{file_name}")
+            resource = await self.client.read_resource(f"file:///{file_name}")
             file_content = json.loads(resource.contents[0].text)["file_content"]
 
             print(f"File Content:\n {file_content}")
@@ -384,7 +365,7 @@ class MCPClient:
         """
         try:
             # Access directory resource using dir:// URI scheme
-            resource = await self.session.read_resource(f"dir://.")
+            resource = await self.client.read_resource(f"dir://.")
             dir_list = json.loads(resource.contents[0].text)["items"]
             self._print_dir_listing(dir_list)
             return

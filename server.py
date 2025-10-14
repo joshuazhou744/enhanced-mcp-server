@@ -1,15 +1,12 @@
-import logging
 from pathlib import Path
 from urllib.parse import unquote
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP, Context
 from pydantic import BaseModel
 from datetime import datetime
+import time
 
 # Project root directory (current working directory)
 BASE_DIR = Path.cwd()
-
-# Module-level logger for server operations
-logger = logging.getLogger("FileOpServer")
 
 class Docname(BaseModel):
     """Pydantic model for documentation filename schema.
@@ -17,8 +14,10 @@ class Docname(BaseModel):
     Used in elicitation to capture user input for documentation file names.
 
     Attributes:
+        file_path: Path of the file we want to generate document on
         name: The name of the documentation file to create
     """
+    file_path: str
     name: str
 
 # FastMCP server instance for handling MCP protocol operations
@@ -41,13 +40,16 @@ def get_path(relative_path: str) -> Path:
         Absolute Path object within BASE_DIR
 
     Raises:
-        ValueError: If path is outside BASE_DIR
+        ValueError: If path is outside base directory
     """
-    rel = Path(relative_path).resolve().relative_to(BASE_DIR)
-    return rel
+    try:
+        rel = Path(relative_path).resolve().relative_to(BASE_DIR)
+        return rel
+    except ValueError:
+        raise ValueError("Path is outside BASE_DIR")
 
 # ============================================================================
-# TOOLS - File Operations
+# TOOLS
 # ============================================================================
     
 
@@ -73,9 +75,20 @@ async def write_file(file_path: str, content: str, ctx: Context) -> str:
         path = get_path(file_path)
         # Create parent directories if they don't exist
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write content with UTF-8 encoding
-        path.write_text(content, encoding='utf-8')
 
+        total = len(content)
+        chunk_size = max(total // 10, 1)
+
+        # Write content with UTF-8 encoding with progress reporting
+        written = 0
+        with open(path, "w", encoding='utf-8') as f:
+            for i in range(0, total, chunk_size):
+                f.write(content[i:i+chunk_size])
+                written = min(i+chunk_size, total)
+                await ctx.report_progress(progress=written, total=total, message=f"Writing progress: {written}/{total}")
+                time.sleep(0.05)
+        
+        await ctx.report_progress(progress=total, total=total, message="Write complete")
         await ctx.info(f"File written successfully to: {file_path}")
         return f"File written successfully to: {file_path}"
     except Exception as e:
@@ -113,9 +126,8 @@ async def delete_file(file_path: str, ctx: Context) -> str:
         await ctx.error(f"Error deleting file: {str(e)}")
         return f"Error deleting file: {str(e)}"
 
-
 # ============================================================================
-# RESOURCES - File Reading
+# RESOURCES
 # ============================================================================
 
 @mcp.resource("file:///{file_name}")
@@ -183,7 +195,7 @@ async def list_files_resource() -> dict:
         return {"error": f"Error listing files: {e}"}
 
 # ============================================================================
-# PROMPTS - Code Editing
+# PROMPTS
 # ============================================================================
 
 @mcp.prompt()
@@ -211,7 +223,7 @@ async def code_review(file_path: str, ctx: Context) -> str:
             error_msg = f"Error: {file_path} is not a valid file"
             await ctx.warning(error_msg)
             raise FileNotFoundError(error_msg)
-
+        
         # Read code and detect language from extension
         current_code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
@@ -230,7 +242,6 @@ Current code:
 Provide a comprehensive evaluation of the code:
 
 """.strip()
-
         await ctx.info("Successfully returned prompt")
         return prompt
 
@@ -239,7 +250,7 @@ Provide a comprehensive evaluation of the code:
         raise
 
 @mcp.prompt()
-async def documentation_generator(file_path: str, ctx: Context) -> str:
+async def documentation_generator(ctx: Context) -> str:
     """Generate a prompt for creating code documentation.
 
     Reads a code file, elicits a documentation filename from the user,
@@ -256,6 +267,13 @@ async def documentation_generator(file_path: str, ctx: Context) -> str:
         FileNotFoundError: If the specified file doesn't exist
     """
     try:
+        # Elicit documentation filename from user via client
+        result = await ctx.elicit(
+            message="Please provide the subject file name and the documentation file name",
+            response_type=Docname
+        )
+
+        file_path = result.data.file_path
         path = get_path(file_path)
 
         # Validate file exists
@@ -268,11 +286,6 @@ async def documentation_generator(file_path: str, ctx: Context) -> str:
         code = path.read_text(encoding='utf-8').strip()
         language = path.suffix.lower()
 
-        # Elicit documentation filename from user via client
-        result = await ctx.elicit(
-            "Please provide the documentation file name",
-            schema=Docname
-        )
         doc_name = result.data.name
 
         # Generate structured prompt for documentation creation
@@ -303,12 +316,5 @@ Use MCP tools available to you to create the separate documentation file:
 # ============================================================================
 
 if __name__ == "__main__":
-    """Entry point for running the MCP server.
-
-    Starts the FastMCP server which listens for MCP protocol messages on stdio.
-    The server exposes file operation tools, file/directory resources, and
-    code documentation prompts.
-    """
-    logger.info("Starting File Operations Server...")
-    # Start the FastMCP server (blocks until terminated)
+    print("Starting File Operations Server...")
     mcp.run()
