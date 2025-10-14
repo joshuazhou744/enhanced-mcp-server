@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import json
+from urllib.parse import quote
 from typing import Optional, Dict, Any, List, Union
 from contextlib import AsyncExitStack
 
@@ -332,9 +333,10 @@ class MCPClient:
         """
         try:
             file_name = input("Enter file path: ").strip()
+            encoded_file_name = quote(file_name, safe="")
             # Access file resource using file:/// URI scheme
-            resource = await self.client.read_resource(f"file:///{file_name}")
-            file_content = json.loads(resource.contents[0].text)["file_content"]
+            resource = await self.client.read_resource(f"file:///{encoded_file_name}")
+            file_content = json.loads(resource[0].text)["file_content"]
 
             print(f"File Content:\n {file_content}")
             return file_content
@@ -366,7 +368,7 @@ class MCPClient:
         try:
             # Access directory resource using dir:// URI scheme
             resource = await self.client.read_resource(f"dir://.")
-            dir_list = json.loads(resource.contents[0].text)["items"]
+            dir_list = json.loads(resource[0].text)["items"]
             self._print_dir_listing(dir_list)
             return
         except Exception as e:

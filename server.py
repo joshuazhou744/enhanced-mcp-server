@@ -1,14 +1,14 @@
 from pathlib import Path
-from urllib.parse import unquote
-from fastmcp import FastMCP, Context
 from pydantic import BaseModel
 from datetime import datetime
 import time
 
+from fastmcp import FastMCP, Context
+
 # Project root directory (current working directory)
 BASE_DIR = Path.cwd()
 
-class Docname(BaseModel):
+class DocumentGeneratorSchema(BaseModel):
     """Pydantic model for documentation filename schema.
 
     Used in elicitation to capture user input for documentation file names.
@@ -148,7 +148,8 @@ async def read_file_resource(file_name: str) -> dict:
 
         # Validate path exists and is a file
         if not path.exists() or not path.is_file():
-            return {"error": f"Error: {file_name} is not a valid file"}
+            error_msg = f"Error: {file_name} is not a valid file"
+            return {"error": error_msg}
         # Read and return file content
         return {"file_content": path.read_text(encoding='utf-8')}
 
@@ -176,7 +177,6 @@ async def list_files_resource() -> dict:
         # Collect directory items with metadata
         items = []
         for item in path.iterdir():
-
             stat = item.stat()
             items.append({
                 "name": item.name,
@@ -186,7 +186,6 @@ async def list_files_resource() -> dict:
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                 "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
             })
-
 
         return {
             "items": items
@@ -270,9 +269,9 @@ async def documentation_generator(ctx: Context) -> str:
         # Elicit documentation filename from user via client
         result = await ctx.elicit(
             message="Please provide the subject file name and the documentation file name",
-            response_type=Docname
+            response_type=DocumentGeneratorSchema
         )
-
+        
         file_path = result.data.file_path
         path = get_path(file_path)
 
@@ -312,7 +311,7 @@ Use MCP tools available to you to create the separate documentation file:
 
 
 # ============================================================================
-# MAIN SERVER ENTRY POINT
+# SERVER ENTRY POINT
 # ============================================================================
 
 if __name__ == "__main__":
