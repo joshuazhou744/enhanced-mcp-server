@@ -276,6 +276,31 @@ class MCPClient:
 
         return "\n".join(final_text)
     
+    async def converse(self):
+        """Start an interactive conversation mode with Claude.
+
+        Allows the user to have a multi-turn conversation with Claude,
+        where each query can trigger tool use. Exits when user types 'quit' or 'q'.
+        """
+        print("\nEntering conversation mode. Type 'quit' or 'q' to exit.")
+
+        while True:
+            query = input("\nQuery: ").strip()
+
+            if query.lower() in ("quit", "q"):
+                break  # Signal exit
+
+            if not query:
+                print("Please enter a query")
+                continue
+
+            try:
+                response = await self.process_query(query)
+                print("\n" + response)
+            except Exception as e:
+                print(f"Error processing query: {e}")
+        return
+    
     async def prompt(self, prompt_name: str):
         """Execute a named prompt template from the MCP server.
 
@@ -296,6 +321,8 @@ class MCPClient:
             if not prompt_obj:
                 print(f"Prompt '{prompt_name}' not found")
                 return
+            
+            print(prompt_obj)
 
             # Collect arguments for the prompt template
             arguments = {}
@@ -374,42 +401,7 @@ class MCPClient:
         except Exception as e:
             print(f"Error reading directory: {e}")
 
-    async def converse(self):
-        """Start an interactive conversation mode with Claude.
-
-        Allows the user to have a multi-turn conversation with Claude,
-        where each query can trigger tool use. Exits when user types 'quit' or 'q'.
-        """
-        print("\nEntering conversation mode. Type 'quit' or 'q' to exit.")
-
-        while True:
-            query = input("\nQuery: ").strip()
-
-            if query.lower() in ("quit", "q"):
-                break  # Signal exit
-
-            if not query:
-                print("Please enter a query")
-                continue
-
-            try:
-                response = await self.process_query(query)
-                print("\n" + response)
-            except Exception as e:
-                print(f"Error processing query: {e}")
-
-        return
-
-    async def quit_action(self):
-        """Signal to exit the client.
-
-        Returns:
-            String "quit" to signal exit from chat loop
-        """
-        print("Exiting client...")
-        return "quit"
-
-    async def chat_loop(self):
+    async def menu(self):
         """Run the main interactive chat loop with menu-driven interface.
 
         Presents a menu of options including prompt execution, file operations,
@@ -450,6 +442,15 @@ q. Quit
             if result == "quit":
                 break
 
+    async def quit_action(self):
+        """Signal to exit the client.
+
+        Returns:
+            String "quit" to signal exit from chat loop
+        """
+        print("Exiting client...")
+        return "quit"
+
     async def cleanup(self):
         """Clean up resources and close connections.
 
@@ -460,6 +461,7 @@ q. Quit
             await self.exit_stack.aclose()
 
 async def main():
+    # Check correct usage
     if len(sys.argv) < 2:
         print("Usage: python client.py <server_path>")
         sys.exit(1)
@@ -471,10 +473,11 @@ async def main():
 
         await client.connect_to_server(server_path)
 
-        await client.chat_loop()
+        await client.menu()
     except Exception as e:
         print(f"Error: {type(e).__name__}: {e}")
     finally:
+        # Always cleanup at the end
         await client.cleanup()
 
 if __name__ == "__main__":
